@@ -4,10 +4,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "csapp.h"
-#include <cstring>
+#include <map>
+#include <queue>
 
 using namespace std;
 
+void *readFromRecvFd(void *arg);
 
 #define WORKTIME 1
 typedef struct {
@@ -38,19 +40,99 @@ int single() ;
 
 void readFromClient(int connfd) ;
 
+void connectToBack() ;
+
+void initReadThread(int ) ;
+
+// 可以乱序
+void readFromReadyClients2(pool *p) ;
+
 #define LISTENQ  1024  /* second argument to listen() */
 
 
 
 int main() {
 
-    single();
-//    multiplexing();
+
+//    single();
+    multiplexing();
 }
+
+int send_fd;
+int recv_fd;
+
+
+int single_fd;
+
+int is_single;
+
+map<char, int> to_fd;
+
+void connectToBack(int single) {
+
+    send_fd = open_clientfd("localhost", 10000);
+    recv_fd = open_clientfd("localhost", 10001);
+
+    initReadThread(single);
+
+    if (send_fd == -1 || recv_fd == -1) {
+        cout << "error" << endl;
+        exit(-1);
+    }
+
+
+}
+
+void initReadThread(int single) {
+
+    is_single = single;
+    pthread_t pid;
+
+    pthread_create(&pid, NULL, readFromRecvFd, &single);
+
+
+}
+
+void *readFromRecvFd(void *arg) {
+
+    size_t n;
+    char buf[MAXLINE];
+    rio_t rio;
+
+    Rio_readinitb(&rio, recv_fd);
+
+    string msg = "ok";
+
+    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+
+//        printf("%s\n", buf);
+        int i = atoi(buf);
+
+        char k = buf[0];
+
+        if (is_single == 1) {
+
+            send(single_fd, buf, n, 0);
+
+        } else {
+
+            cout << "ret" << buf << endl;
+//            cout << "oo fd: " << to_fd[k] << endl;
+            cout << buf << endl;
+            string msg = atoi(buf) + "\n";
+
+            send(to_fd[k], buf, n, 0);
+        }
+    }
+
+}
+
 
 // 阻塞 --------------------------------------
 int single() {
-    int listenfd, connfd;
+
+    connectToBack(1);
+    int listenfd;
     socklen_t  clientlen;
     struct sockaddr_storage clientaddr;
 
@@ -58,12 +140,15 @@ int single() {
 
     listenfd = open_listenfd(9999);
 
+
+
+
     while (true) {
 
         clientlen = sizeof(struct sockaddr_storage);
-        connfd = accept(listenfd, (SA *) &clientaddr, &clientlen);
+        single_fd = accept(listenfd, (SA *) &clientaddr, &clientlen);
         getnameinfo((SA *) &clientaddr, clientlen, client_hostname, MAXLINE, client_port, MAXLINE, 0);
-        readFromClient(connfd);
+        readFromClient(single_fd);
     }
 }
 
@@ -76,10 +161,9 @@ void readFromClient(int connfd) {
 
     string msg = "ok";
     while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-//        Rio_writen(connfd, buf, n);
 
-        printf("%s\n", buf);
-        addIntoMq(buf, connfd);
+//        printf("single recv from client %s\n", buf);
+        send(send_fd, buf, n, 0);
     }
 }
 
@@ -87,7 +171,14 @@ void readFromClient(int connfd) {
 
 
 // 多路复用 --------------------------------------
+
+//queue<int> m;
+map<char, vector<int>> mm ;
+
+
 int multiplexing() {
+
+    connectToBack(0);
 
     int listenfd, connfd;
     socklen_t  clientlen;
@@ -111,7 +202,8 @@ int multiplexing() {
             add_client(connfd, &pool);
         }
 
-        readFromReadyClients(&pool);
+//        readFromReadyClients(&pool);
+        readFromReadyClients2(&pool);
     }
 }
 
@@ -152,6 +244,7 @@ void add_client(int connfd, pool *p) {
     }
 }
 
+// 不可乱序
 void readFromReadyClients(pool *p) {
 
     int i, connfd, n;
@@ -168,8 +261,40 @@ void readFromReadyClients(pool *p) {
         if ((connfd > 0) && (FD_ISSET(connfd, &p->ready_set))) {
             p->nready--;
             if ((n = rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-                cout << buf << endl;
-                addIntoMq(buf, connfd);
+//                addIntoMq(buf, connfd);
+                int i = atoi(buf);
+                char k = buf[0];
+                char c = buf[1];
+
+                cout << "from client" << i << endl;
+
+                if (mm.find(k) == mm.end()) {
+
+                    vector<int> v;
+
+                    v.push_back(i);
+                    mm[k] = v;
+                } else {
+                    vector<int> v = mm[k];
+                    v.push_back(i);
+                    mm[k] = v;
+                }
+                if (c == '0') { // send all
+                    vector<int> v = mm[k];
+                    vector<int>::const_iterator iter = v.begin();
+                    to_fd[k] = connfd;
+                    cout << "fd: " << connfd << endl;
+                    while (iter != v.end()) {
+
+                        int v = *iter.base();
+
+                        string msg = to_string(v) + "\n";
+
+                        cout << " send to back : " << msg << endl;
+                        send(send_fd, msg.c_str(), msg.length(), 0);
+                        iter++;
+                    }
+                }
             } else {
                 close(connfd);
                 FD_CLR(connfd, &p->read_set);
@@ -177,12 +302,42 @@ void readFromReadyClients(pool *p) {
             }
         }
     }
+}
 
+// 可以乱序
+void readFromReadyClients2(pool *p) {
+
+    int i, connfd, n;
+
+    char buf[MAXLINE];
+    rio_t rio;
+
+    for (i = 0; (i <= p->maxi) && (p->nready > 0); i++) {
+
+
+        connfd = p->clientfd[i];
+        rio = p->clientrio[i];
+
+        if ((connfd > 0) && (FD_ISSET(connfd, &p->ready_set))) {
+            p->nready--;
+            if ((n = rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+
+
+
+                to_fd[buf[0]] = connfd;
+                send(send_fd, buf, n, 0);
+            } else {
+                close(connfd);
+                FD_CLR(connfd, &p->read_set);
+                p->clientfd[i] = -1;
+            }
+        }
+    }
 }
 
 // 多路复用 --------------------------------------
 
-// 插入 mq, 处理结束后再通过 connfd 返回消息给 client
+// 插入 mq, 处理结束后再通过 connfd 返回消息给 client, 假设这些一共需要耗时 WORKTIME
 void addIntoMq(char* msg, int connfd) {
 
     sleep(WORKTIME);
